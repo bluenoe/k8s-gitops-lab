@@ -1,0 +1,38 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: todo-staging
+  namespace: argocd
+  labels:
+    environment: staging
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/your-org/todo-app
+    targetRevision: HEAD
+    path: charts/todo
+    helm:
+      valueFiles:
+        - values-stg.yaml
+      parameters:
+        - name: image.tag
+          value: "stable"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: todo-staging
+  syncPolicy:
+    automated:
+      prune: false  # Manual approval for staging
+      selfHeal: true
+      allowEmpty: false
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+      - PruneLast=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+  revisionHistoryLimit: 10

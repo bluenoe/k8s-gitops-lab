@@ -1,0 +1,77 @@
+# Staging environment values
+replicaCount: 2
+
+image:
+  repository: todo-app
+  tag: stable
+  pullPolicy: IfNotPresent
+
+config:
+  nodeEnv: staging
+  logLevel: info
+
+ingress:
+  enabled: true
+  className: "traefik"
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"
+  hosts:
+    - host: todo-staging.yourcompany.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: todo-staging-tls
+      hosts:
+        - todo-staging.yourcompany.com
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 250m
+    memory: 256Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+redis:
+  enabled: true
+  auth:
+    enabled: true
+    password: "staging-redis-secure-password"
+  master:
+    persistence:
+      enabled: true
+      size: 2Gi
+      storageClass: standard
+    resources:
+      limits:
+        cpu: 250m
+        memory: 256Mi
+      requests:
+        cpu: 100m
+        memory: 128Mi
+
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    namespace: monitoring
+    interval: 30s
+
+# Pod Disruption Budget for high availability
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Network Policies for security
+networkPolicy:
+  enabled: true

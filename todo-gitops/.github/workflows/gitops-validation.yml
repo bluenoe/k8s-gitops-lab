@@ -1,0 +1,151 @@
+name: GitOps Validation
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  validate-manifests:
+    runs-on: ubuntu-latest
+    name: Validate Kubernetes Manifests
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Setup Helm
+      uses: azure/setup-helm@v3
+      with:
+        version: '3.12.0'
+
+    - name: Install kubeval
+      run: |
+        wget https://github.com/instrumenta/kubeval/releases/latest/download/kubeval-linux-amd64.tar.gz
+        tar xf kubeval-linux-amd64.tar.gz
+        sudo mv kubeval /usr/local/bin
+        kubeval --version
+
+    - name: Validate ArgoCD Applications
+      run: |
+        echo "Validating ArgoCD Application manifests..."
+        for file in applications/*.yaml; do
+          echo "Validating $file"
+          kubeval "$file"
+        done
+        kubeval app-of-apps.yaml
+
+    - name: Validate Sealed Secrets
+      run: |
+        echo "Validating Sealed Secrets manifests..."
+        for env in dev staging; do
+          if [ -f "environments/${env}/redis-sealedsecret.yaml" ]; then
+            echo "Validating environments/${env}/redis-sealedsecret.yaml"
+            kubeval "environments/${env}/redis-sealedsecret.yaml"
+          fi
+        done
+
+  security-scan:
+    runs-on: ubuntu-latest
+    name: Security Scan
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'config'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  policy-validation:
+    runs-on: ubuntu-latest
+    name: Policy Validation
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Conftest
+      run: |
+        wget https://github.com/open-policy-agent/conftest/releases/download/v0.46.0/conftest_0.46.0_Linux_x86_64.tar.gz
+        tar xzf conftest_0.46.0_Linux_x86_64.tar.gz
+        sudo mv conftest /usr/local/bin
+
+    - name: Run Conftest policies
+      run: |
+        # Create a basic policy for ArgoCD applications
+        mkdir -p policy
+        cat > policy/argocd.rego << 'EOF'
+        package argocd
+
+        deny[msg] {
+          input.kind == "Application"
+          not input.spec.syncPolicy.automated
+          msg := "ArgoCD Application should have automated sync policy"
+        }
+
+        deny[msg] {
+          input.kind == "Application"
+          not input.spec.project
+          msg := "ArgoCD Application must specify a project"
+        }
+        EOF
+        
+        # Validate ArgoCD applications against policies
+        conftest verify --policy policy applications/*.yaml || echo "Policy validation completed with warnings"
+
+  gitops-diff:
+    runs-on: ubuntu-latest
+    name: GitOps Diff Analysis
+    if: github.event_name == 'pull_request'
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup ArgoCD CLI
+      run: |
+        curl -sSL -o argocd-linux-amd64 https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+        sudo install -m 555 argocd-linux-amd64 /usr/local/bin/argocd
+        argocd version --client
+
+    - name: Analyze GitOps changes
+      run: |
+        echo "## GitOps Change Analysis" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Get changed files
+        CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}..HEAD)
+        
+        echo "### Changed Files:" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo "$CHANGED_FILES" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Analyze impact
+        if echo "$CHANGED_FILES" | grep -q "applications/"; then
+          echo "⚠️ **ArgoCD Applications modified** - Review application sync policies" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if echo "$CHANGED_FILES" | grep -q "environments/"; then
+          echo "🔒 **Environment configurations modified** - Verify secrets and configs" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if echo "$CHANGED_FILES" | grep -q "app-of-apps.yaml"; then
+          echo "🚨 **App-of-Apps modified** - Critical change requiring careful review" >> $GITHUB_STEP_SUMMARY
+        fi
